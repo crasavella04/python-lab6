@@ -63,8 +63,8 @@ Middleware в `app/main.py` добавляет к каждому ответу з
 **1. Клонировать репозиторий**
 
 ```bash
-git clone <url-репозитория>
-cd lab6
+git clone https://github.com/crasavella04/python-lab6.git
+cd python-lab6
 ```
 
 **2. Создать файл `.env`** из примера (строка подключения в коде не хранится, она читается из `DATABASE_URL`):
