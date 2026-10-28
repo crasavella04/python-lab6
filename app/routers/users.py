@@ -28,7 +28,9 @@ async def create_user(data: UserCreate, session: AsyncSession = Depends(get_sess
     except IntegrityError:
         # на случай гонки двух одновременных запросов с одинаковым email
         await session.rollback()
-        raise HTTPException(status.HTTP_409_CONFLICT, detail="Email already registered")
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail="Email already registered"
+        ) from None
     await session.refresh(user)
     return user
 
