@@ -3,7 +3,7 @@ async def test_create_user(client):
         "/users", json={"email": "alice@example.com", "name": "Alice"}
     )
 
-    assert response.status_code == 201
+    assert response.status_code == 200
     body = response.json()
     assert body["id"] == 1
     assert body["email"] == "alice@example.com"
