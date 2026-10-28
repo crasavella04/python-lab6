@@ -11,6 +11,21 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 
+# ---------- Этап для тестов (docker compose run --rm tests) ----------
+FROM builder AS test
+
+WORKDIR /app
+
+COPY requirements.txt requirements-dev.txt ./
+RUN pip install -r requirements-dev.txt
+
+COPY pytest.ini ./
+COPY app ./app
+COPY tests ./tests
+
+CMD ["python", "-m", "pytest", "-v"]
+
+
 # ---------- Этап 2: финальный образ ----------
 FROM python:3.12-slim AS runtime
 
