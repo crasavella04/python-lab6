@@ -5,3 +5,5 @@ __pycache__/
 .idea/
 .vscode/
 .claude/
+.pytest_cache/
+.ruff_cache/
