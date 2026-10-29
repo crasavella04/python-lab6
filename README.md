@@ -235,10 +235,10 @@ job `test` упал, `build` пропущен.
   docker pull ghcr.io/crasavella04/python-lab6:latest
   ```
 
-- **Docker Hub:** [docker.io/DOCKERHUB_USERNAME/python-lab6](https://hub.docker.com/r/DOCKERHUB_USERNAME/python-lab6)
+- **Docker Hub:** [hub.docker.com/repository/docker/crasavella/python-lab6](https://hub.docker.com/repository/docker/crasavella/python-lab6)
 
   ```bash
-  docker pull DOCKERHUB_USERNAME/python-lab6:latest
+  docker pull crasavella/python-lab6:latest
   ```
 
 ## Скриншоты (практическая работа №2)
