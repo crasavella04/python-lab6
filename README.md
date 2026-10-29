@@ -1,7 +1,14 @@
 # Менеджер задач — REST API на FastAPI + PostgreSQL
 
+![CI](https://github.com/crasavella04/python-lab6/actions/workflows/ci.yml/badge.svg)
+
 Практическая работа №2: REST API на **FastAPI** с хранением данных в **PostgreSQL** через **SQLAlchemy 2.0 (async)**,
-валидацией через **Pydantic v2**, миграциями **Alembic** и middleware **Starlette**.
+валидацией через **Pydantic v2**, миграциями **Alembic** и middleware **Starlette**
+(состояние на момент сдачи — тег [`lab6`](https://github.com/crasavella04/python-lab6/tree/lab6)).
+
+Практическая работа №3: автотесты на **pytest** с реальной PostgreSQL, многоэтапный **Dockerfile**,
+полный **docker-compose** (приложение + БД + миграции) и CI/CD в **GitHub Actions** с публикацией образа
+в GHCR и Docker Hub — см. разделы [Тесты](#тесты), [Docker](#docker), [CI/CD](#cicd).
 
 ## Стек
 
@@ -12,11 +19,17 @@
 | Pydantic v2 + pydantic-settings | схемы запросов/ответов и конфигурация из окружения |
 | Alembic | миграции схемы БД |
 | PostgreSQL 16 (Docker) | хранилище |
+| pytest + pytest-asyncio + httpx | автотесты API |
+| ruff | линтер |
+| Docker, Docker Compose | контейнеризация |
+| GitHub Actions, GHCR, Docker Hub | CI/CD и реестры образов |
 
 ## Структура проекта
 
 ```
 .
+├── .github/workflows/
+│   └── ci.yml           # CI/CD: lint, test, build
 ├── app/
 │   ├── __init__.py
 │   ├── main.py          # создание приложения, middleware, подключение роутеров
@@ -29,10 +42,19 @@
 │       └── tasks.py     # CRUD /tasks
 ├── migrations/          # Alembic (шаблон async)
 │   └── versions/        # миграция create users and tasks
+├── tests/
+│   ├── conftest.py      # тестовая БД tasks_test, очистка таблиц, подмена get_session
+│   ├── test_users.py
+│   ├── test_tasks.py
+│   └── test_middleware.py
 ├── screenshots/         # скриншоты для отчёта
 ├── alembic.ini
-├── docker-compose.yml
+├── Dockerfile           # многоэтапная сборка: builder → test / runtime
+├── docker-compose.yml   # db + app (миграции перед стартом) + tests
+├── pyproject.toml       # настройки ruff
+├── pytest.ini
 ├── requirements.txt
+├── requirements-dev.txt # pytest, pytest-asyncio, httpx, ruff
 ├── .env.example
 └── README.md
 ```
@@ -119,7 +141,107 @@ docker compose exec db psql -U app -d tasks -c "\dt"
 
 Остановить БД: `docker compose down` (с удалением данных: `docker compose down -v`).
 
-## Скриншоты
+## Тесты
+
+Тесты работают с реальной PostgreSQL, но в отдельной БД **`tasks_test`** (создаётся автоматически, если её нет).
+Перед каждым тестом все таблицы очищаются (`TRUNCATE ... RESTART IDENTITY`), а зависимость `get_session`
+подменяется через `app.dependency_overrides` на сессию тестовой БД.
+
+| Тест | Что проверяет |
+|---|---|
+| `test_create_user` | создание пользователя → 201 |
+| `test_create_user_duplicate_email` | повторный email → 409 |
+| `test_create_user_invalid_email` | невалидный email → 422 |
+| `test_create_task` | создание задачи → 201 |
+| `test_create_task_unknown_owner` | задача с несуществующим владельцем → 404 |
+| `test_list_tasks_filter_done_and_pagination` | фильтр `done` и пагинация `limit`/`offset` |
+| `test_patch_updates_only_sent_fields` | PATCH меняет только переданные поля |
+| `test_delete_then_get_returns_404` | DELETE → 204, затем GET → 404 |
+| `test_process_time_header` | наличие заголовка `X-Process-Time` |
+
+### Запуск тестов локально
+
+```bash
+docker compose up -d db
+pip install -r requirements-dev.txt
+python -m pytest -v
+ruff check .
+```
+
+Адрес тестовой БД по умолчанию — `postgresql+asyncpg://app:app@localhost:5432/tasks_test`,
+его можно переопределить переменной окружения `TEST_DATABASE_URL`.
+
+### Запуск тестов через Docker Compose
+
+```bash
+docker compose --profile test run --rm --build tests
+```
+
+Сервис `tests` собирается из этапа `test` Dockerfile, дожидается готовности `db` и запускает `pytest`.
+
+## Docker
+
+`Dockerfile` использует многоэтапную сборку:
+
+- **builder** — ставит зависимости из `requirements.txt` в виртуальное окружение `/opt/venv`;
+- **test** — на основе builder добавляет `requirements-dev.txt` и тесты (используется только сервисом `tests`);
+- **runtime** — финальный образ на `python:3.12-slim`: копирует из builder только готовый `/opt/venv`,
+  код приложения и миграции и запускается от непривилегированного пользователя `app`.
+
+Запуск всего приложения (БД + миграции + API):
+
+```bash
+docker compose up -d --build
+```
+
+- `db` объявлен с healthcheck (`pg_isready`);
+- `app` стартует только после того, как `db` стала `healthy` (`depends_on: condition: service_healthy`),
+  и перед запуском uvicorn выполняет `alembic upgrade head`.
+
+Swagger UI: <http://localhost:8000/docs>. Остановить: `docker compose down`.
+
+## CI/CD
+
+Workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) запускается на каждый `push` и `pull_request`:
+
+| Job | Когда | Что делает |
+|---|---|---|
+| `lint` | всегда | `ruff check .` |
+| `test` | всегда | поднимает service-контейнер `postgres:16` и запускает `pytest` |
+| `build` | только `push` в `main` и только после успешных `lint` и `test` (`needs`) | собирает образ (этап `runtime`) и публикует его в GHCR и Docker Hub с тегами `latest` и `sha-<коммит>` |
+
+Для входа в GHCR используется встроенный `GITHUB_TOKEN`, для Docker Hub — секреты репозитория
+`DOCKERHUB_USERNAME` и `DOCKERHUB_TOKEN`.
+
+### Проверка pipeline (pull request с намеренно сломанным тестом)
+
+В [PR #1](https://github.com/crasavella04/python-lab6/pull/1) тест `test_create_user` был намеренно
+сломан (ожидался код 200 вместо 201), затем исправлен, после чего PR был смёржен.
+
+**«Упавший» pipeline** — [run](https://github.com/crasavella04/python-lab6/actions/runs/40730244896):
+job `test` упал, `build` пропущен.
+
+![CI failed](screenshots/14_ci_pr_failed.png)
+
+**Успешный pipeline** после исправления теста — [run](https://github.com/crasavella04/python-lab6/actions/runs/40730636044):
+
+![CI success](screenshots/15_ci_pr_fixed.png)
+
+### Опубликованные образы
+
+- **GHCR:** [ghcr.io/crasavella04/python-lab6](https://github.com/crasavella04/python-lab6/pkgs/container/python-lab6)
+
+  ```bash
+  docker pull ghcr.io/crasavella04/python-lab6:latest
+  ```
+
+- **Docker Hub:** [docker.io/DOCKERHUB_USERNAME/python-lab6](https://hub.docker.com/r/DOCKERHUB_USERNAME/python-lab6)
+
+  ```bash
+  docker pull DOCKERHUB_USERNAME/python-lab6:latest
+  ```
+
+## Скриншоты (практическая работа №2)
 
 ### Swagger UI — общий вид
 
@@ -181,7 +303,7 @@ docker compose exec db psql -U app -d tasks -c "\dt"
 
 ![psql \dt](screenshots/13_psql_dt.png)
 
-## Ответы на контрольные вопросы
+## Ответы на контрольные вопросы (практическая работа №2)
 
 ### 1. Чем FastAPI отличается от Starlette и какие компоненты Starlette он использует?
 
@@ -260,3 +382,86 @@ TaskUpdate(description=None).model_dump(exclude_none=True)   # {}
 Миграции (Alembic) решают это: каждое изменение схемы — версионированный файл в git с `upgrade`/`downgrade`,
 текущая версия записана в таблице `alembic_version`, изменения применяются одинаково и воспроизводимо
 на всех окружениях (`alembic upgrade head`), их можно проверить на ревью и откатить.
+
+## Ответы на контрольные вопросы (практическая работа №3)
+
+### 1. Чем CI отличается от CD (continuous delivery и continuous deployment)?
+
+CI — это процесс постоянного обновления кода: на этапе CI проходят тесты, линтеры и т. д.
+CD отвечает за доставку кода до профильной среды.
+
+### 2. Как работает `dependency_overrides` и зачем он нужен в тестах?
+
+`dependency_overrides` перезатирает зависимости проекта. Это нужно для работы с тестовыми данными.
+
+### 3. Зачем нужна многоэтапная сборка образа?
+
+Для оптимизации скорости сборки и размера образа: разные этапы могут кешироваться для ускорения сборки,
+а в конечный образ попадает только последний этап.
+
+### 4. Почему контейнер не следует запускать от root?
+
+Контейнер — это не виртуальная машина: процессы в нём работают на ядре хоста, и без user namespaces
+root внутри контейнера — это тот же UID 0, что и root на хосте. Поэтому:
+
+- при уязвимости в ядре или container runtime, а также при неудачной конфигурации (смонтированный
+  `docker.sock`, `--privileged`, тома с файлами хоста) взломанный процесс получает права root **на хосте**;
+- даже без выхода из контейнера злоумышленник, захвативший приложение, может от root изменить код,
+  установить свои пакеты, читать и подменять любые файлы внутри контейнера;
+- это нарушает принцип наименьших привилегий: веб-приложению не нужны права root, чтобы слушать
+  порт 8000 и ходить в БД;
+- многие платформы (Kubernetes с `runAsNonRoot`, OpenShift) вообще не запускают контейнеры от root.
+
+В этом проекте финальный этап Dockerfile создаёт системного пользователя `app` и переключается на него
+(`USER app`), а файлы кода принадлежат root, так что приложение не может их изменить.
+
+### 5. Как в GitHub Actions передаются секреты и почему их нельзя хранить в репозитории?
+
+Секреты записываются на платформе GitHub. В секретах могут быть ключи, пароли и другие чувствительные
+данные, которые нельзя выставлять публично.
+
+### 6. Что произойдёт с job-ом build, если упадёт test? Где это задаётся?
+
+Job `build` **не запустится** — он получит статус *skipped* (это видно на скриншоте «упавшего» pipeline
+выше), и образ не будет собран и опубликован. Так в реестр никогда не попадает версия с непройденными тестами.
+
+Задаётся это в `.github/workflows/ci.yml` ключом `needs`:
+
+```yaml
+build:
+  needs: [lint, test]
+  if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+```
+
+Без `needs` все job-ы workflow запускаются параллельно и независимо. С `needs` job ждёт завершения
+перечисленных job-ов и по умолчанию (неявное условие `success()`) запускается, только если все они
+завершились успешно. Изменить это поведение можно явным условием, например `if: always()` или
+`if: failure()`. Дополнительное условие `if` здесь ограничивает `build` только push-ем в `main`,
+поэтому на pull request он пропускается даже при зелёных тестах.
+
+### 7. Где лучше применять миграции: при старте контейнера или отдельным шагом в CD? Каковы плюсы и минусы каждого варианта?
+
+**При старте контейнера** (так сделано в `docker-compose.yml`: `alembic upgrade head && exec uvicorn ...`):
+
+- ➕ просто: не нужен отдельный шаг, схема БД всегда соответствует версии кода в образе;
+- ➕ одинаково работает локально, в Compose и на одном сервере;
+- ➖ при нескольких репликах миграции запускаются одновременно в каждой и могут конфликтовать
+  (Alembic по умолчанию не берёт блокировку);
+- ➖ долгая миграция задерживает старт и может сорвать healthcheck, а упавшая — приводит
+  к циклическому перезапуску контейнера;
+- ➖ приложению нужны права на изменение схемы (DDL), хотя для работы ему хватило бы прав на чтение и запись данных;
+- ➖ миграции нельзя проконтролировать отдельно: нет отдельного лога, ручного подтверждения, отката перед выкаткой.
+
+**Отдельным шагом в CD** (отдельный job, одноразовый контейнер `alembic upgrade head`, Kubernetes Job
+перед обновлением подов):
+
+- ➕ миграция выполняется ровно один раз, до выкатки новой версии; если она упала, деплой
+  останавливается и старая версия продолжает работать;
+- ➕ для миграций можно использовать отдельную учётную запись с правами DDL, а приложению оставить минимальные права;
+- ➕ отдельные логи, возможность ручного подтверждения (environments с approval) и бэкапа перед миграцией;
+- ➖ pipeline сложнее: CD нужен сетевой доступ к БД и её учётные данные;
+- ➖ между миграцией и выкаткой новой версии работает старый код, поэтому миграции нужно писать
+  обратно совместимыми (схема expand/contract: сначала добавить столбец, потом убрать старый).
+
+**Вывод:** для локальной разработки и одного экземпляра приложения удобно применять миграции при старте
+контейнера (как в этом проекте). Для production с несколькими репликами лучше отдельный шаг в CD.
